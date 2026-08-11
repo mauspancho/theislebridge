@@ -1,0 +1,25 @@
+[Unit]
+Description=The Isle Server Bridge API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=theisle-bridge
+Group=theisle-bridge
+Environment=PYTHONUNBUFFERED=1
+Environment=THEISLE_BRIDGE_RUNTIME_DIR=/run/theisle-server-bridge
+RuntimeDirectory=theisle-server-bridge
+RuntimeDirectoryMode=0770
+WorkingDirectory=/opt/theisle-server-bridge
+ExecStart=/opt/theisle-server-bridge/venv/bin/python -m theisle_bridge --config /etc/theisle-server-bridge/config.toml serve
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/run/theisle-server-bridge /var/lib/theisle-server-bridge /var/log/theisle-server-bridge
+
+[Install]
+WantedBy=multi-user.target

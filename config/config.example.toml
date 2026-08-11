@@ -1,0 +1,25 @@
+[server]
+root = "/path/to/theisle-evrima"
+binary = "/path/to/theisle-evrima/TheIsle/Binaries/Linux/TheIsleServer-Linux-Shipping"
+binaries_dir = "/path/to/theisle-evrima/TheIsle/Binaries/Linux"
+service = "theisle-evrima.service"
+build_id = "cf63a41bf6a6fcbf"
+
+[rcon]
+host = "127.0.0.1"
+port = 8888
+game_ini = "/path/to/theisle-evrima/TheIsle/Saved/Config/LinuxServer/Game.ini"
+timeout_seconds = 3.0
+
+[api]
+bind = "127.0.0.1"
+port = 8765
+token_file = "/etc/theisle-server-bridge/token"
+public_health = true
+
+[native]
+runtime_dir = "/run/theisle-server-bridge"
+request_timeout_seconds = 10.0
+
+[compatibility]
+require_supported_build = true
