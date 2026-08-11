@@ -40,6 +40,12 @@ Game version observed: 0.21.784
 
 If the server binary Build ID does not match, health/status can still run, but write operations are rejected.
 
+The installer detects both GNU Build ID output from `readelf -n` and libmagic/file output such as:
+
+```text
+BuildID[xxHash]=cf63a41bf6a6fcbf
+```
+
 ## Install On Debian
 
 Clone this repository on the Debian server where The Isle is already installed, then run:
@@ -49,6 +55,14 @@ sudo ./install.sh
 ```
 
 The installer detects the existing game installation, UE4SS, `Game.ini`, optional systemd unit, Build ID, and UE4SS mod directory. It never reinstalls The Isle and never deletes saves. Any file it changes is backed up first.
+
+`TheIsleBridgeNative` is built as a real UE4SS C++ mod against the detected or supplied UE4SS source tree:
+
+```bash
+sudo UE4SS_SOURCE_DIR=/path/to/ue4ss-linux ./install.sh
+```
+
+The native artifact is validated before install. `main.so` must be an ELF64 x86_64 shared object and export `start_mod` and `uninstall_mod`.
 
 Default paths created:
 
@@ -61,6 +75,8 @@ Default paths created:
 ```
 
 The API binds to `127.0.0.1:8765` by default.
+
+The bearer token is stored as `root:theisle-bridge` with mode `0640`. The native mod directory and `main.so` are installed with read/execute permissions so the The Isle process can load the mod.
 
 ## API
 
@@ -95,6 +111,17 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8765/api/v1/players
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8765/api/v1/players/<steamId>/prime
 ```
 
+Native mod diagnostics:
+
+```bash
+nm -D <Mods/TheIsleBridgeNative/libs/main.so> | c++filt | grep -E 'start_mod|uninstall_mod|CppUserModBase'
+grep TheIsleBridgeNative <TheIsle/Binaries/Linux/UE4SS.log>
+grep TheIsleBridgeNative /proc/<TheIsle PID>/maps
+curl http://127.0.0.1:8765/health
+```
+
+`/health` reports `nativeMod=online` only when `/run/theisle-server-bridge/native.status` has a recent heartbeat and the reported The Isle PID still exists.
+
 Manual Prime test, never run automatically by the installer:
 
 ```bash
@@ -109,6 +136,7 @@ curl -X POST \
 - Write operations require a supported Build ID.
 - Prime uses read, validate, mutate, read-back, verify.
 - The bridge service is separate from the The Isle service; restarting the bridge does not restart the game.
+- Updating `main.so` requires a manual The Isle restart to load the new native mod.
 - `PrimeProbeNative` should remain untouched until `TheIsleBridgeNative` has been validated on the real server.
 
 More detail lives in `docs/`.

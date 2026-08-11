@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <ctime>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -24,12 +25,16 @@
 #include <unordered_map>
 #include <vector>
 
+#include <Mod/CppUserModBase.hpp>
+
 namespace {
 
 using UObject = void;
 using UFunction = void;
 using ProcessEventFn = void (*)(UObject*, UFunction*, void*);
 
+constexpr std::string_view kModName = "TheIsleBridgeNative";
+constexpr std::string_view kModVersion = "0.1.1";
 constexpr std::string_view kSupportedBuildId = "cf63a41bf6a6fcbf";
 constexpr uintptr_t kGUObjectArray = 0xC95C600;
 constexpr uintptr_t kNamePool = 0xC8A10F0;
@@ -52,10 +57,12 @@ constexpr ptrdiff_t FField_Next = 0x18;
 constexpr ptrdiff_t FField_NamePrivate = 0x20;
 constexpr ptrdiff_t FProperty_OffsetInternal = 0x44;
 
-std::atomic_bool g_running{true};
+std::atomic_bool g_running{false};
 std::atomic_bool g_in_call{false};
 std::string g_build_id;
 bool g_build_supported = false;
+std::thread g_worker_thread;
+std::mutex g_worker_mutex;
 
 using GameEngineTickFn = void (*)(void*, float, bool);
 GameEngineTickFn g_original_tick = nullptr;
@@ -91,6 +98,11 @@ std::string hex_bytes(const uint8_t* data, size_t len) {
 void log_line(const std::string& message) {
     std::fprintf(stderr, "[TheIsleBridgeNative] %s\n", message.c_str());
     std::fflush(stderr);
+}
+
+std::filesystem::path runtime_dir() {
+    const char* runtime_env = std::getenv("THEISLE_BRIDGE_RUNTIME_DIR");
+    return runtime_env ? std::filesystem::path(runtime_env) : std::filesystem::path("/run/theisle-server-bridge");
 }
 
 bool looks_mapped(uintptr_t address) {
@@ -421,45 +433,115 @@ bool install_tick_hook() {
     return true;
 }
 
+void uninstall_tick_hook() {
+    if (!g_tick_hooked || !g_original_tick || !looks_mapped(kGEngine)) return;
+    UObject* engine = read_value<UObject*>(kGEngine);
+    if (!engine || !looks_mapped(reinterpret_cast<uintptr_t>(engine))) return;
+    void** vtable = *reinterpret_cast<void***>(engine);
+    if (!looks_mapped(reinterpret_cast<uintptr_t>(vtable))) return;
+    void** slot = &vtable[kGameEngineTickSlot];
+    if (!make_writable(slot)) return;
+    *slot = reinterpret_cast<void*>(g_original_tick);
+    g_tick_hooked = false;
+    g_original_tick = nullptr;
+    log_line("GameEngine::Tick hook restored");
+}
+
+std::string parse_build_id_notes(const std::vector<char>& notes) {
+    size_t pos = 0;
+    while (pos + sizeof(Elf64_Nhdr) <= notes.size()) {
+        auto* note = reinterpret_cast<const Elf64_Nhdr*>(notes.data() + pos);
+        pos += sizeof(Elf64_Nhdr);
+        const size_t name_pos = pos;
+        pos += ((note->n_namesz + 3) / 4) * 4;
+        const size_t desc_pos = pos;
+        pos += ((note->n_descsz + 3) / 4) * 4;
+        if (name_pos + note->n_namesz > notes.size() || desc_pos + note->n_descsz > notes.size() || pos > notes.size()) {
+            return {};
+        }
+        const char* name = notes.data() + name_pos;
+        const unsigned char* desc = reinterpret_cast<const unsigned char*>(notes.data() + desc_pos);
+        if (note->n_type == NT_GNU_BUILD_ID && note->n_namesz >= 3 && std::strncmp(name, "GNU", 3) == 0) {
+            std::string out;
+            char buf[3] = {};
+            for (uint32_t i = 0; i < note->n_descsz; ++i) {
+                std::snprintf(buf, sizeof(buf), "%02x", desc[i]);
+                out += buf;
+            }
+            return out;
+        }
+    }
+    return {};
+}
+
+bool read_file_range(std::ifstream& file, uint64_t offset, uint64_t size, std::vector<char>& out) {
+    if (size == 0 || size > 1024 * 1024) return false;
+    out.assign(static_cast<size_t>(size), '\0');
+    file.seekg(static_cast<std::streamoff>(offset));
+    file.read(out.data(), static_cast<std::streamsize>(out.size()));
+    return static_cast<bool>(file);
+}
+
 std::string read_build_id() {
     std::ifstream file("/proc/self/exe", std::ios::binary);
     if (!file) return {};
     Elf64_Ehdr ehdr{};
     file.read(reinterpret_cast<char*>(&ehdr), sizeof(ehdr));
-    if (!file || std::memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0) return {};
+    if (!file || std::memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0 || ehdr.e_ident[EI_CLASS] != ELFCLASS64) return {};
+
     file.seekg(ehdr.e_phoff);
     std::vector<Elf64_Phdr> phdrs(ehdr.e_phnum);
     file.read(reinterpret_cast<char*>(phdrs.data()), static_cast<std::streamsize>(phdrs.size() * sizeof(Elf64_Phdr)));
-    for (const auto& phdr : phdrs) {
-        if (phdr.p_type != PT_NOTE) continue;
-        std::vector<char> notes(phdr.p_filesz);
-        file.seekg(phdr.p_offset);
-        file.read(notes.data(), static_cast<std::streamsize>(notes.size()));
-        size_t pos = 0;
-        while (pos + sizeof(Elf64_Nhdr) <= notes.size()) {
-            auto* note = reinterpret_cast<const Elf64_Nhdr*>(notes.data() + pos);
-            pos += sizeof(Elf64_Nhdr);
-            const char* name = notes.data() + pos;
-            pos += ((note->n_namesz + 3) / 4) * 4;
-            const unsigned char* desc = reinterpret_cast<const unsigned char*>(notes.data() + pos);
-            pos += ((note->n_descsz + 3) / 4) * 4;
-            if (note->n_type == NT_GNU_BUILD_ID && note->n_namesz >= 3 && std::strncmp(name, "GNU", 3) == 0) {
-                std::string out;
-                char buf[3] = {};
-                for (uint32_t i = 0; i < note->n_descsz; ++i) {
-                    std::snprintf(buf, sizeof(buf), "%02x", desc[i]);
-                    out += buf;
-                }
-                return out;
+    if (file) {
+        for (const auto& phdr : phdrs) {
+            if (phdr.p_type != PT_NOTE) continue;
+            std::vector<char> notes;
+            if (read_file_range(file, phdr.p_offset, phdr.p_filesz, notes)) {
+                auto id = parse_build_id_notes(notes);
+                if (!id.empty()) return id;
+            }
+        }
+    }
+
+    file.clear();
+    file.seekg(ehdr.e_shoff);
+    std::vector<Elf64_Shdr> shdrs(ehdr.e_shnum);
+    file.read(reinterpret_cast<char*>(shdrs.data()), static_cast<std::streamsize>(shdrs.size() * sizeof(Elf64_Shdr)));
+    if (file) {
+        for (const auto& shdr : shdrs) {
+            if (shdr.sh_type != SHT_NOTE) continue;
+            std::vector<char> notes;
+            if (read_file_range(file, shdr.sh_offset, shdr.sh_size, notes)) {
+                auto id = parse_build_id_notes(notes);
+                if (!id.empty()) return id;
             }
         }
     }
     return {};
 }
 
+void write_heartbeat(const std::filesystem::path& runtime) {
+    const auto tmp = runtime / "native.status.tmp";
+    const auto final = runtime / "native.status";
+    std::ofstream file(tmp);
+    file << "PID=" << ::getpid() << "\n";
+    file << "BUILD_ID=" << g_build_id << "\n";
+    file << "BUILD_SUPPORTED=" << (g_build_supported ? "1" : "0") << "\n";
+    file << "MOD_NAME=" << kModName << "\n";
+    file << "MOD_VERSION=" << kModVersion << "\n";
+    file << "TIMESTAMP=" << static_cast<long long>(std::time(nullptr)) << "\n";
+    file.close();
+    std::filesystem::rename(tmp, final);
+}
+
+void clear_heartbeat(const std::filesystem::path& runtime) {
+    std::error_code ec;
+    std::filesystem::remove(runtime / "native.status", ec);
+    std::filesystem::remove(runtime / "native.status.tmp", ec);
+}
+
 void worker() {
-    const char* runtime_env = std::getenv("THEISLE_BRIDGE_RUNTIME_DIR");
-    const std::filesystem::path runtime = runtime_env ? runtime_env : "/run/theisle-server-bridge";
+    const std::filesystem::path runtime = runtime_dir();
     std::filesystem::create_directories(runtime / "requests");
     std::filesystem::create_directories(runtime / "results");
 
@@ -467,8 +549,14 @@ void worker() {
     g_build_supported = g_build_id == kSupportedBuildId;
     log_line("startup build_id=" + g_build_id + " supported=" + (g_build_supported ? std::string("true") : std::string("false")));
 
+    auto last_heartbeat = std::chrono::steady_clock::time_point{};
     while (g_running) {
         try {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_heartbeat >= std::chrono::seconds(1)) {
+                write_heartbeat(runtime);
+                last_heartbeat = now;
+            }
             const auto request_dir = runtime / "requests";
             for (const auto& entry : std::filesystem::directory_iterator(request_dir)) {
                 if (entry.path().extension() != ".req") continue;
@@ -501,15 +589,61 @@ void worker() {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+    clear_heartbeat(runtime);
 }
 
-__attribute__((constructor)) void on_load() {
-    static std::thread thread([] { worker(); });
-    thread.detach();
+void start_worker() {
+    std::lock_guard<std::mutex> lock(g_worker_mutex);
+    if (g_running) return;
+    g_running = true;
+    g_worker_thread = std::thread([] { worker(); });
 }
 
-__attribute__((destructor)) void on_unload() {
+void stop_worker() {
+    std::lock_guard<std::mutex> lock(g_worker_mutex);
+    if (!g_running) return;
     g_running = false;
+    if (g_worker_thread.joinable()) {
+        g_worker_thread.join();
+    }
+    uninstall_tick_hook();
 }
 
 }  // namespace
+
+class TheIsleBridgeNativeMod : public RC::CppUserModBase {
+public:
+    TheIsleBridgeNativeMod() : CppUserModBase() {
+        ModName = STR("TheIsleBridgeNative");
+        ModVersion = STR("0.1.1");
+        ModDescription = STR("Local IPC bridge for The Isle Evrima Prime actions");
+        ModAuthors = STR("mauspancho, OpenAI Codex");
+        log_line("UE4SS C++ mod constructed");
+    }
+
+    ~TheIsleBridgeNativeMod() override {
+        stop_worker();
+        log_line("UE4SS C++ mod uninstalled");
+    }
+
+    auto on_unreal_init() -> void override {
+        log_line("on_unreal_init: starting IPC worker");
+        start_worker();
+    }
+};
+
+#if defined(_WIN32)
+#define THEISLE_BRIDGE_NATIVE_API __declspec(dllexport)
+#else
+#define THEISLE_BRIDGE_NATIVE_API __attribute__((visibility("default")))
+#endif
+
+extern "C" {
+THEISLE_BRIDGE_NATIVE_API RC::CppUserModBase* start_mod() {
+    return new TheIsleBridgeNativeMod();
+}
+
+THEISLE_BRIDGE_NATIVE_API void uninstall_mod(RC::CppUserModBase* mod) {
+    delete mod;
+}
+}

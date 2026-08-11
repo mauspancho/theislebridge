@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import socket
+import subprocess
 from urllib.parse import urlparse
 
 from .auth import authorize, read_token
@@ -13,7 +14,8 @@ from .build_registry import is_supported_build
 from .commands import PrimeCommandHandler
 from .config import BridgeConfig
 from .game_ini import read_rcon_settings
-from .ipc import NativeTimeoutError, runtime_paths
+from .ipc import NativeTimeoutError
+from .native_status import read_native_status
 from .rcon import EvrimaRconClient, RconError, is_steam_id64
 
 
@@ -101,16 +103,38 @@ class BridgeHandler(BaseHTTPRequestHandler):
             rcon_online = True
         except Exception:
             rcon_online = False
-        requests, results = runtime_paths(self.server.config.native.runtime_dir)
-        native_online = requests.exists() and results.exists()
-        return {
+        native = read_native_status(self.server.config.native.runtime_dir)
+        body = {
             "status": "ok",
-            "gameServer": "unknown",
+            "gameServer": self._game_server_status(rcon_online),
             "rcon": "online" if rcon_online else "offline",
-            "nativeMod": "online" if native_online else "unknown",
             "buildSupported": build_supported,
             "buildId": self.server.config.server.build_id,
         }
+        body.update(native.to_health())
+        return body
+
+    def _game_server_status(self, rcon_online: bool) -> str:
+        if rcon_online:
+            return "online"
+        service = self.server.config.server.service
+        if not service:
+            return "unknown"
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", service],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return "unknown"
+        if result.stdout.strip() == "active":
+            return "online"
+        if result.stdout.strip() in {"inactive", "failed", "deactivating"}:
+            return "offline"
+        return "unknown"
 
     def _players(self) -> None:
         players = self.server.prime.players()

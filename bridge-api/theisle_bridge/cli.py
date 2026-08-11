@@ -10,6 +10,7 @@ from .build_registry import is_supported_build
 from .config import load_config
 from .game_ini import read_rcon_settings
 from .ipc import runtime_paths
+from .native_status import read_native_status
 from .rcon import EvrimaRconClient, parse_playerlist
 
 
@@ -25,6 +26,11 @@ def doctor(config_path: str) -> int:
     checks["buildSupported"] = is_supported_build(config.server.build_id)
     checks["runtimeRequestsExists"] = runtime_paths(config.native.runtime_dir)[0].exists()
     checks["runtimeResultsExists"] = runtime_paths(config.native.runtime_dir)[1].exists()
+    native = read_native_status(config.native.runtime_dir)
+    checks["nativeMod"] = native.state
+    checks["nativePid"] = native.pid
+    checks["nativeBuildId"] = native.build_id
+    checks["nativeBuildSupported"] = native.build_supported
     try:
         settings = read_rcon_settings(config.rcon.game_ini)
         checks["rconEnabled"] = settings.enabled

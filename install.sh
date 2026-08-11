@@ -16,7 +16,7 @@ detect_binary() {
     select_candidate "Multiple The Isle server binaries found:" "${binaries[@]}"
   else
     local root
-    root="$(prompt_path 'Ruta raíz de la instalación existente de The Isle:')"
+    root="$(prompt_path 'Ruta raiz de la instalacion existente de The Isle:')"
     local candidate="$root/TheIsle/Binaries/Linux/TheIsleServer-Linux-Shipping"
     [[ -f "$candidate" ]] || fail "server binary not found at $candidate"
     printf '%s\n' "$candidate"
@@ -62,23 +62,6 @@ detect_game_ini() {
   else
     fail "Game.ini not found under $root"
   fi
-}
-
-detect_ue4ss_source() {
-  local root="$1"
-  local candidates=(
-    "${UE4SS_SOURCE_DIR:-}"
-    "$root/ue4ss-native-dev"
-    "$root/UE4SS"
-    "/opt/ue4ss-linux"
-  )
-  for candidate in "${candidates[@]}"; do
-    if [[ -n "$candidate" && -d "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return
-    fi
-  done
-  prompt_path 'Ruta del código/fuentes UE4SS disponibles para compilar mods:'
 }
 
 ensure_user() {
@@ -157,32 +140,6 @@ EOF_CONFIG
   chown root:theisle-bridge "$config_path"
 }
 
-build_native_mod() {
-  local ue4ss_source="$1"
-  local build_dir="$STATE_DIR/build-native"
-  mkdir -p "$build_dir"
-  cmake -S "$REPO_DIR/native-mod" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE=Game__Shipping__Linux64 -DUE4SS_ROOT="$ue4ss_source"
-  cmake --build "$build_dir" --target TheIsleBridgeNative -j2
-  printf '%s\n' "$build_dir/Game__Shipping__Linux64/lib/libTheIsleBridgeNative.so"
-}
-
-install_native_mod() {
-  local so_path="$1"
-  local mods_dir="$2"
-  local mod_dir="$mods_dir/TheIsleBridgeNative"
-  mkdir -p "$mod_dir/libs"
-  backup_file "$mod_dir/libs/main.so"
-  install -m 0755 "$so_path" "$mod_dir/libs/main.so"
-  local mods_txt="$mods_dir/mods.txt"
-  touch "$mods_txt"
-  backup_file "$mods_txt"
-  if grep -Eq '^[[:space:]]*TheIsleBridgeNative[[:space:]]*:' "$mods_txt"; then
-    sed -i 's/^[[:space:]]*TheIsleBridgeNative[[:space:]]*:.*/TheIsleBridgeNative : 1/' "$mods_txt"
-  else
-    printf '\nTheIsleBridgeNative : 1\n' >> "$mods_txt"
-  fi
-}
-
 main() {
   require_root
   [[ -f /etc/debian_version ]] || fail "this installer targets Debian"
@@ -192,6 +149,9 @@ main() {
   command -v cmake >/dev/null || fail "cmake is required"
   command -v ninja >/dev/null || fail "ninja-build is required"
   command -v readelf >/dev/null || fail "binutils/readelf is required"
+  command -v nm >/dev/null || fail "binutils/nm is required"
+  command -v c++filt >/dev/null || fail "binutils/c++filt is required"
+  command -v file >/dev/null || fail "file is required"
   command -v rsync >/dev/null || fail "rsync is required"
   command -v curl >/dev/null || fail "curl is required"
 
@@ -236,13 +196,16 @@ main() {
   "$INSTALL_DIR/venv/bin/python" -m compileall -q "$INSTALL_DIR/theisle_bridge"
 
   if [[ ! -f "$CONFIG_DIR/token" ]]; then
-    umask 077
-    python3 - <<'PY' > "$CONFIG_DIR/token"
+    (
+      umask 077
+      python3 - <<'PY' > "$CONFIG_DIR/token"
 import secrets
 print(secrets.token_urlsafe(32))
 PY
-    chown root:theisle-bridge "$CONFIG_DIR/token"
+    )
   fi
+  chown root:theisle-bridge "$CONFIG_DIR/token"
+  chmod 0640 "$CONFIG_DIR/token"
 
   write_config "$root" "$binary" "$binaries_dir" "$service" "$build_id" "$game_ini" "$rcon_port"
   grant_game_ini_read_access "$game_ini"

@@ -12,6 +12,19 @@ All `/api/v1/*` endpoints require `Authorization: Bearer <token>`.
 
 Read-only. Does not require auth by default.
 
+`nativeMod` is `online` only when the native mod heartbeat is fresh and its reported PID exists. The endpoint may also include:
+
+```json
+{
+  "nativePid": 1234,
+  "nativeBuildId": "cf63a41bf6a6fcbf",
+  "nativeBuildSupported": true,
+  "nativeModVersion": "0.1.1"
+}
+```
+
+RCON and native mod health are independent because RCON can be offline while The Isle is still starting.
+
 ## GET /api/v1/players
 
 Uses RCON `playerlist` and returns online players as SteamID64 plus player name.
